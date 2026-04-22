@@ -58,6 +58,7 @@ const setContinuous = document.getElementById('setContinuous');
 const setContactEmail = document.getElementById('setContactEmail');
 const setSenderEmail = document.getElementById('setSenderEmail');
 const setSenderPass = document.getElementById('setSenderPass');
+const setGeminiKey = document.getElementById('setGeminiKey');
 const setAutoReport = document.getElementById('setAutoReport');
 const testEmailBtn = document.getElementById('testEmailBtn');
 const customSoundUpload = document.getElementById('customSoundUpload');
@@ -95,8 +96,8 @@ let environmentType = 'standard';
 const CONFIG = {
   DENSITY_THRESHOLD: 4,
   RUNNING_THRESHOLD: 3,
-  RUNNING_SENSITIVITY: 0.08,
-  ACTIVITY_SENSITIVITY: 0.05, // Threshold for limb oscillation (Aspect Ratio change)
+  RUNNING_SENSITIVITY: 0.12, // Increased for screens-per-second metric (Walking ~0.15-0.2)
+  ACTIVITY_SENSITIVITY: 0.04, // Threshold for limb oscillation (Aspect Ratio change)
   ADAPTIVE_MODE: true,
   CONTINUOUS_DRIVE: true, // Learn from drift over time
   DETECTION_INTERVAL_MS: 1000,
@@ -108,6 +109,7 @@ const CONFIG = {
   CONTACT_EMAIL: '',
   SENDER_EMAIL: '',
   SENDER_PASS: '',
+  GEMINI_API_KEY: '',
   AUTO_REPORT: true,
   CLUSTER_THRESHOLD: 1.2, // People within 1.2x their width of each other
   PANIC_WINDOW_SIZE: 5,   // Seconds of audio history
@@ -119,8 +121,9 @@ const CONFIG = {
 let genAI = null;
 function getGenAI() {
   if (!genAI) {
-    // Try both process.env and import.meta.env for compatibility
-    const apiKey = (typeof process !== 'undefined' && process.env && process.env.GEMINI_API_KEY) || 
+    // Priority: 1. User specified in UI (localStorage), 2. Environment Variables
+    const apiKey = CONFIG.GEMINI_API_KEY || 
+                   (typeof process !== 'undefined' && process.env && process.env.GEMINI_API_KEY) || 
                    (import.meta.env && import.meta.env.VITE_GEMINI_API_KEY);
     if (apiKey) {
       genAI = new GoogleGenAI({ apiKey });
@@ -257,7 +260,7 @@ async function runDetectionFrame() {
   analyzeSound();
 
   try {
-    const predictions = await model.detect(video);
+    const predictions = await model.detect(video, 40, 0.35); // Max 40 detections, min 0.35 score
     
     // Calculate Average Height for relative child/elderly detection
     const heights = predictions.filter(p => p.class === 'person').map(p => p.bbox[3]);
@@ -308,38 +311,41 @@ async function runDetectionFrame() {
 
        if (bestMatch !== null) {
           const track = trackingBuffer.get(bestMatch);
+          const now = Date.now();
+          const dt = (now - (track.lastTimestamp || (now - CONFIG.DETECTION_INTERVAL_MS))) / 1000;
+          track.lastTimestamp = now;
+
           // Determine "Destiny Point" (where they'll be in 3 seconds)
-          track.destX = det.cx + (det.cx - track.lastX) * 30;
-          track.destY = det.cy + (det.cy - track.lastY) * 30;
+          track.destX = det.cx + (det.cx - track.lastX) * (3 / dt);
+          track.destY = det.cy + (det.cy - track.lastY) * (3 / dt);
           
           const actualDist = Math.sqrt((det.cx - track.lastX)**2 + (det.cy - track.lastY)**2);
-          const velocity = actualDist / video.videoWidth; 
+          // Velocity (screens per second)
+          const velocity = (actualDist / video.videoWidth) / dt; 
           
-          // Acceleration & Jerk analysis
           const prevVx = track.vx || 0;
           const prevVy = track.vy || 0;
           const prevAx = track.ax || 0;
-          const prevAy = track.ay || 0;
           
-          track.vx = det.cx - track.lastX;
-          track.vy = det.cy - track.lastY;
-          track.ax = track.vx - prevVx;
-          track.ay = track.vy - prevVy;
+          track.vx = (det.cx - track.lastX) / video.videoWidth / dt;
+          track.vy = (det.cy - track.lastY) / video.videoWidth / dt;
+          const currentAccelX = (track.vx - prevVx) / dt;
+          const currentAccelY = (track.vy - prevVy) / dt;
           
-          // Jerk: Rate of change of acceleration
-          const jerk = Math.sqrt((track.ax - prevAx)**2 + (track.ay - prevAy)**2) / video.videoWidth;
-          const acceleration = Math.sqrt(track.ax**2 + track.ay**2) / video.videoWidth;
+          const acceleration = Math.sqrt(currentAccelX**2 + currentAccelY**2);
+          track.ax = currentAccelX;
+          track.ay = currentAccelY;
 
           // Update aspect ratio history
           track.ratioHistory.push(det.ratio);
-          if (track.ratioHistory.length > 15) track.ratioHistory.shift();
+          if (track.ratioHistory.length > 20) track.ratioHistory.shift();
 
           // Advanced Stride & Cadence Analysis
           let activityScore = 0;
           let oscillationFrequency = 0;
           let strideRegularity = 0;
           
-          if (track.ratioHistory.length > 8) {
+          if (track.ratioHistory.length > 6) {
              const avg = track.ratioHistory.reduce((a, b) => a + b, 0) / track.ratioHistory.length;
              const variance = track.ratioHistory.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / track.ratioHistory.length;
              activityScore = Math.sqrt(variance);
@@ -352,33 +358,46 @@ async function runDetectionFrame() {
                 }
              }
              
-             oscillationFrequency = crossings.length / track.ratioHistory.length;
+             // Crossings per second
+             oscillationFrequency = (crossings.length / track.ratioHistory.length) / dt;
              
-             // Stride Regularity: Low variance in time between crossings indicates rhythmic human movement (running/walking)
              if (crossings.length >= 3) {
                 const intervals = [];
                 for(let j=1; j<crossings.length; j++) intervals.push(crossings[j] - crossings[j-1]);
                 const avgInterval = intervals.reduce((a,b) => a+b, 0) / intervals.length;
-                strideRegularity = 1 / (1 + intervals.reduce((a,b) => a + Math.pow(b - avgInterval, 2), 0) / intervals.length);
+                const intervalVar = intervals.reduce((a,b) => a + Math.pow(b - avgInterval, 2), 0) / intervals.length;
+                strideRegularity = 1 / (1 + intervalVar);
              }
           }
 
-          const isFast = velocity > CONFIG.RUNNING_SENSITIVITY;
-          const isAccelerating = acceleration > 0.012;
-          const hasSteadyJerk = jerk < 0.05; // Extreme jerk often means detection noise/jitter, not smooth running
-          const isOscillating = activityScore > CONFIG.ACTIVITY_SENSITIVITY;
-          const hasHumanCadence = oscillationFrequency > 0.25 && oscillationFrequency < 0.7;
-          const isRegular = strideRegularity > 0.6;
+          // Sensitivity thresholds (tuned for screens per second)
+          // 0.20+ is typically a brisk jog; 0.40+ is a decisive sprint in many FOVs
+          const isMoving = velocity > CONFIG.RUNNING_SENSITIVITY;
+          const isFast = velocity > CONFIG.RUNNING_SENSITIVITY * 1.8;
+          const isVeryFast = velocity > CONFIG.RUNNING_SENSITIVITY * 4.5;
+          const isSuddenStart = acceleration > 0.35; // Significant burst
+          const hasHumanOscillation = activityScore > CONFIG.ACTIVITY_SENSITIVITY * 1.5 && oscillationFrequency > 0.6;
           
-          // Hybrid logic: Must be moving fast, oscillating rhythmically, and showing "human" stride patterns
-          const isRunningNow = isFast && ((isOscillating && hasHumanCadence && isRegular) || (isAccelerating && hasSteadyJerk));
+          const isRetreating = track.orientation === 'Retreating (Back)';
           
-          // Scoring with persistence
-          track.runScore = (track.runScore || 0) + (isRunningNow ? 1.6 : -0.8);
-          if (isRunningNow && isAccelerating) track.runScore += 0.4;
-          track.runScore = Math.max(0, Math.min(8, track.runScore));
+          // Hybrid logic for running: Requires speed + physical behavior
+          const isRunningNow = isVeryFast || 
+                               (isFast && isSuddenStart) || 
+                               (isMoving && hasHumanOscillation && strideRegularity > 0.8) ||
+                               (isVeryFast && isRetreating && acceleration > 0.08);
           
-          const isConfirmedRunner = track.runScore >= 4.0;
+          // Persistent Detection Score with harder confirmation
+          track.runScore = (track.runScore || 0);
+          if (isRunningNow) {
+             track.runScore += 2.0; // Steady ramp up
+          } else if (isMoving) {
+             track.runScore -= 0.8; // Faster decay if just walking
+          } else {
+             track.runScore -= 2.0; // Rapid reset if stopped
+          }
+          track.runScore = Math.max(0, Math.min(10, track.runScore));
+          
+          const isConfirmedRunner = track.runScore >= 6.0; 
           if (isConfirmedRunner) runners++;
 
           track.lastX = det.cx;
@@ -388,15 +407,10 @@ async function runDetectionFrame() {
           track.activity = activityScore;
           track.persistence = (track.persistence || 0) + 1;
           
-          // Crowd Orientation Heuristic: 
-          // (Assuming standard overhead/tilted camera)
-          // Moving 'up' the screen (decreasing Y) = Moving Away (Back view likely)
-          // Moving 'down' the screen (increasing Y) = Approaching (Front view likely)
-          const verticalMovement = track.vy || 0;
+          // Orientation logic
+          const verticalMovement = (det.cy - track.lastY);
           if (Math.abs(verticalMovement) > 2) {
              track.orientation = verticalMovement < 0 ? 'Retreating (Back)' : 'Approaching (Front)';
-          } else {
-             track.orientation = track.orientation || 'Static/Side';
           }
 
           // Refined Vulnerable scoring (Children, Elderly, Wheelchairs)
@@ -1443,6 +1457,7 @@ settingsBtn.addEventListener('click', () => {
   setContactEmail.value = CONFIG.CONTACT_EMAIL || '';
   setSenderEmail.value = CONFIG.SENDER_EMAIL || '';
   setSenderPass.value = CONFIG.SENDER_PASS || '';
+  setGeminiKey.value = CONFIG.GEMINI_API_KEY || '';
   setAutoReport.checked = CONFIG.AUTO_REPORT;
   settingsModal.classList.remove('hidden');
 });
@@ -1462,8 +1477,13 @@ saveSettingsBtn.addEventListener('click', () => {
   CONFIG.CONTACT_EMAIL = setContactEmail.value.trim();
   CONFIG.SENDER_EMAIL = setSenderEmail.value.trim();
   CONFIG.SENDER_PASS = setSenderPass.value.replace(/\s+/g, '');
+  CONFIG.GEMINI_API_KEY = setGeminiKey.value.trim();
   CONFIG.AUTO_REPORT = setAutoReport.checked;
   localStorage.setItem('stampedeShieldSettings', JSON.stringify(CONFIG));
+  
+  // Reset Gemini instance to force re-initialization with new key
+  genAI = null;
+  
   if (detectionTimer) {
     clearInterval(detectionTimer);
     detectionTimer = setInterval(runDetectionFrame, CONFIG.DETECTION_INTERVAL_MS);

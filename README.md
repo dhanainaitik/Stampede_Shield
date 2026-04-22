@@ -1,6 +1,6 @@
- 🛡️ Stampede Shield: Advanced Crowd Safety AI
+# 🛡️ Stampede Shield: Advanced Crowd Safety AI
 
-**Stampede Shield** is a high-performance, AI-driven crowd monitoring and stampede prevention system. Designed for security personnel and event organisers , it utilizes real-time computer vision to detect early precursors of crowd panic and hazardous density.
+**Stampede Shield** is a high-performance, AI-driven crowd monitoring and stampede prevention system. Designed for security personnel, event organizers, and terminal managers, it utilizes real-time computer vision to detect early precursors of crowd panic and hazardous density.
 
 ---
 
@@ -10,9 +10,10 @@
 *   **Local Processing (90%):** Utilizes `COCO-SSD` via TensorFlow.js for immediate, private, and zero-latency person detection directly in your browser.
 *   **Gemini Cognitive Layer (10%):** Proxies high-level scene analysis to Google Gemini for complex behavioral insights, predicting potential risks before they escalate.
 
-### 2. 🏃 Kinetic Motion & Running Detection
-*   **Limb Oscillation Analysis:** Unlike simple movement trackers, our **Kinetic Aspect Oscillation (KAO)** algorithm analyzes the rhythmic shape changes of human limbs to distinguish between actual running and moving objects (like vehicles or carts).
-*   **Pace Sensitivity Controls:** Manually tune the sensitivity for "running" detection to match the environment (e.g., airports vs. stadiums).
+### 2. 🏃 Kinetic Motion & Gait Analysis
+*   **Physical Gaussian Oscillations:** Uses the **Kinetic Aspect Oscillation (KAO)** algorithm to analyze rhythmic shape changes of human limbs. This differentiates high-speed human gait from other rapid-moving objects (carts, debris).
+*   **Time-Aware Vector Gating:** Calculates velocity and acceleration in a normalized "percent-of-screen-per-second" metric. This maintains accuracy regardless of browser lag, camera frame-rate, or resolution.
+*   **Smarter Persistence:** Implements a weighted scoring system (Hysteresis) that requires multiple frames of high-confidence running behavior to confirm a "Runner," drastically reducing false positives from momentary motion jitters.
 
 ### 3. 🚨 Disaster Response System
 *   **Hoard Alert (Emergency):** Triggers a high-intensity alarm when a specific number of individuals start running simultaneously (indicative of a stampede onset).
