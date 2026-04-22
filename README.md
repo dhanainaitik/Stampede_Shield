@@ -1,6 +1,6 @@
-# 🛡️ Stampede Shield: Advanced Crowd Safety AI
+ 🛡️ Stampede Shield: Advanced Crowd Safety AI
 
-**Stampede Shield** is a high-performance, AI-driven crowd monitoring and stampede prevention system. Designed for security personnel, event organizers, and terminal managers, it utilizes real-time computer vision to detect early precursors of crowd panic and hazardous density.
+**Stampede Shield** is a high-performance, AI-driven crowd monitoring and stampede prevention system. Designed for security personnel and event organisers , it utilizes real-time computer vision to detect early precursors of crowd panic and hazardous density.
 
 ---
 
