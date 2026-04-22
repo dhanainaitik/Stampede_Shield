@@ -89,4 +89,4 @@
 *   **AI Models:** `coco-ssd` (Local Detection), `gemini-3-flash-preview` (Behavioral Intelligence)
 *   **Backend:** Express.js + Nodemailer (Critical Alert Routing)
 *   **Storage:** LocalStorage (Config) + IndexedDB (Custom Sound Blobs)
-*   **Network:** Geolocation API, Web Bluetooth API (BLE), Web Audio API
+*   **Network:** Geolocation API, Web Bluetooth API (BLE) Web Audio API
