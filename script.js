@@ -41,6 +41,7 @@ const exportReportBtn = document.getElementById('exportReportBtn');
 const panicSoundEl = document.getElementById('panicSound');
 const networkLoadEl = document.getElementById('networkLoad');
 const vulnerableCountEl = document.getElementById('vulnerableCount');
+const consensusValueEl = document.getElementById('consensusValue');
 const settingsModal = document.getElementById('settingsModal');
 const closeSettingsBtn = document.getElementById('closeSettingsBtn');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
@@ -386,11 +387,38 @@ async function runDetectionFrame() {
           track.isRunning = isConfirmedRunner;
           track.activity = activityScore;
           track.persistence = (track.persistence || 0) + 1;
+          
+          // Crowd Orientation Heuristic: 
+          // (Assuming standard overhead/tilted camera)
+          // Moving 'up' the screen (decreasing Y) = Moving Away (Back view likely)
+          // Moving 'down' the screen (increasing Y) = Approaching (Front view likely)
+          const verticalMovement = track.vy || 0;
+          if (Math.abs(verticalMovement) > 2) {
+             track.orientation = verticalMovement < 0 ? 'Retreating (Back)' : 'Approaching (Front)';
+          } else {
+             track.orientation = track.orientation || 'Static/Side';
+          }
 
-          // Refined Vulnerable scoring: Small size + vertical posture (to distinguish from falling)
-          const isSmall = det.h < (avgHeight * 0.58) && det.ratio < 0.8;
-          track.vulnerableScore = (track.vulnerableScore || 0) + (isSmall ? 1 : -0.6);
-          track.vulnerableScore = Math.max(0, Math.min(10, track.vulnerableScore));
+          // Refined Vulnerable scoring (Children, Elderly, Wheelchairs)
+          const isShorter = det.h < (avgHeight * 0.68);
+          const isHumanoidWeight = det.ratio < 0.9; // Distinguish from debris or low objects
+          const highPressure = clusterPressure >= 2;
+          
+          // Threat Proximity: Is there a runner nearby?
+          let runnerNearby = false;
+          trackingBuffer.forEach(t => {
+             if (t.isRunning && Math.sqrt((det.cx - t.lastX)**2 + (det.cy - t.lastY)**2) < 200) {
+                runnerNearby = true;
+             }
+          });
+
+          let vScoreDelta = isShorter && isHumanoidWeight ? 1.2 : -0.8;
+          if (isShorter && runnerNearby) vScoreDelta += 1.5; // Panic + Vulnerable = High Escalation
+          if (isShorter && highPressure) vScoreDelta += 1.0; // Compression risk
+          
+          track.vulnerableScore = (track.vulnerableScore || 0) + vScoreDelta;
+          track.vulnerableScore = Math.max(0, Math.min(12, track.vulnerableScore));
+          
           const isVulnerable = track.vulnerableScore >= 5;
           if (isVulnerable) vulnerableCount++;
 
@@ -414,7 +442,8 @@ async function runDetectionFrame() {
             isVulnerable: isVulnerable,
             isFallen: isFallen,
             isTrapped: isTrapped,
-            clusterPressure: clusterPressure
+            clusterPressure: clusterPressure,
+            orientation: track.orientation
           });
        } else {
           // New track - high persistence threshold (2 frames) before counting
@@ -451,8 +480,9 @@ async function runDetectionFrame() {
        }
     }
 
-    // Secondary Filter: Motion Consistency (Panning Suppression)
+    // Secondary Filter: Motion Consistency (Panning Suppression or Consensus)
     // If multiple objects move with nearly identical vectors, it's global camera motion
+    let directionalConsensus = 0;
     if (runners > 1) {
       const activeTracks = currentTracks.filter(t => t.isRunning).map(t => trackingBuffer.get(t.trackId));
       const vxs = activeTracks.map(t => t.vx);
@@ -472,6 +502,11 @@ async function runDetectionFrame() {
       if (isPanning) {
          runners = 0;
          currentTracks.forEach(t => t.isRunning = false);
+      } else {
+         // Directional Consensus: How much of the crowd is moving in the SAME direction
+         // High consensus in a non-panning shot is a very strong stampede precursor
+         const normalizedConsensus = 1 - Math.min(1, Math.sqrt(varX + varY) / 100);
+         directionalConsensus = normalizedConsensus * 100;
       }
     }
 
@@ -505,6 +540,7 @@ async function runDetectionFrame() {
       fallingCount,
       trappedCount: trappedAtBarrierCount,
       panicLevel: panicLevel,
+      directionalConsensus,
       networkLoad: Math.min(100, Math.round((confirmedPeople.length / CONFIG.DENSITY_THRESHOLD) * 60 + Math.random() * 20)),
       motionLevel: runners > 0 ? 'High' : (confirmedPeople.length > 5 ? 'Medium' : 'Low'),
       density: (confirmedPeople.length / 4).toFixed(1),
@@ -519,7 +555,8 @@ async function runDetectionFrame() {
           isVulnerable: p.isVulnerable,
           isFallen: p.isFallen,
           isTrapped: p.isTrapped,
-          clusterPressure: p.clusterPressure
+          clusterPressure: p.clusterPressure,
+          orientation: p.orientation
         };
       }),
       heatPoints: confirmedPeople.map(p => ({ x: p.cx, y: p.cy, intensity: p.score })),
@@ -602,10 +639,12 @@ async function runGeminiInsight(peopleCount) {
     const prompt = isLearning 
       ? `This is a safety monitoring system in calibration mode. Current people count: ${peopleCount}. 
          1. Categorize this scene (e.g. "Airport Terminal", "Narrow Stairwell", "Busy Plaza").
-         2. Suggest if the environment is normally "Static" (people standing) or "Dynamic" (walking).
-         3. Provide a safety insight.
-         Return in format: [Category] Insight.` 
-      : `Current count: ${peopleCount}. Safety threshold: ${CONFIG.DENSITY_THRESHOLD}. Environment: ${environmentType}. Provide 1-sentence proactive safety insight.`;
+         2. Suggest optimal Density Threshold (currently ${CONFIG.DENSITY_THRESHOLD}) and Running Sensitivity (currently ${CONFIG.RUNNING_SENSITIVITY}).
+         3. Identity specific hazards (e.g. "Slippery floors", "Counter-flow bottleneck").
+         Return in format: [Category] Insight. CONFIG: DENSITY=X, SENSITIVITY=Y` 
+      : `Current count: ${peopleCount}. Safety threshold: ${CONFIG.DENSITY_THRESHOLD}. Environment: ${environmentType}. 
+         Analyze the crowd FLOW: Are they mostly facing/moving towards or away from the camera? Are there any back-side occlusions?
+         Provide 1-sentence proactive safety insight focused on orientation and direction.`;
 
     const result = await ai.models.generateContent({
       model: "gemini-3-flash-preview", 
@@ -621,6 +660,13 @@ async function runGeminiInsight(peopleCount) {
     if (isLearning) {
       const match = text.match(/\[(.*?)\]/);
       if (match) environmentType = match[1];
+      
+      const configMatch = text.match(/CONFIG: DENSITY=(\d+), SENSITIVITY=([\d.]+)/);
+      if (configMatch) {
+         CONFIG.DENSITY_THRESHOLD = parseInt(configMatch[1]);
+         CONFIG.RUNNING_SENSITIVITY = parseFloat(configMatch[2]);
+         logEvent('info', `AI Adjusted Thresholds for ${environmentType}: Density=${CONFIG.DENSITY_THRESHOLD}, Sensitivity=${CONFIG.RUNNING_SENSITIVITY}`);
+      }
       logEvent('info', `Scene identified as: ${environmentType}`);
     }
     
@@ -659,6 +705,7 @@ function updateUI(result) {
   
   if (networkLoadEl) networkLoadEl.textContent = `${networkLoad}%`;
   if (vulnerableCountEl) vulnerableCountEl.textContent = vulnerableCount;
+  if (consensusValueEl) consensusValueEl.textContent = `${Math.round(result.directionalConsensus)}%`;
 
   if (vulnerableCount > 0 || fallingCount > 0 || trappedCount > 0) {
      if (fallingCount > 0) logEvent('alert', `CRITICAL: ${fallingCount} person falling detected!`);
@@ -690,9 +737,10 @@ function updateUI(result) {
   const isHoard = runnersCount >= CONFIG.RUNNING_THRESHOLD;
   const isDensityRisk = peopleCount >= CONFIG.DENSITY_THRESHOLD;
   const isPanicRisk = panicLevel > 80;
+  const isConsensusRisk = result.directionalConsensus > 85 && runnersCount > 1;
 
-  if (isHoard || isDensityRisk || isPanicRisk) {
-    triggerAlert(peopleCount, runnersCount, isHoard, isPanicRisk, vulnerableCount);
+  if (isHoard || isDensityRisk || isPanicRisk || isConsensusRisk) {
+    triggerAlert(peopleCount, runnersCount, isHoard || isConsensusRisk, isPanicRisk, vulnerableCount, result.directionalConsensus);
   } else {
     clearAlert();
   }
@@ -772,11 +820,14 @@ function drawBoxes(boxes, convergePoint) {
     
     ctx.strokeRect(b.x, b.y, b.w, b.h);
     
+    // Final Label construction
+    const finalLabel = `${label} [${b.orientation || 'SIDE'}]`;
+    
     // Label plate with background
-    const textWidth = ctx.measureText(label).width;
+    const textWidth = ctx.measureText(finalLabel).width;
     ctx.fillRect(b.x, b.y - 25, textWidth + 15, 25);
     ctx.fillStyle = '#fff';
-    ctx.fillText(label, b.x + 7, b.y - 7);
+    ctx.fillText(finalLabel, b.x + 7, b.y - 7);
 
     // If fallen or trapped, draw a warning pulse
     if (b.isFallen || b.isTrapped) {
@@ -812,8 +863,13 @@ function drawHeatmap(points) {
   
   ctx.globalCompositeOperation = 'screen';
   points.forEach(p => {
+    // Perspective Awareness: People further away (higher Y) contribute 
+    // more to density calculation intensity as they represent larger actual areas
+    const perspectiveFactor = 0.5 + (p.y / heatmap.height) * 0.8;
+    ctx.globalAlpha = Math.min(1, perspectiveFactor);
     ctx.drawImage(brush, p.x - 140, p.y - 140);
   });
+  ctx.globalAlpha = 1.0;
   ctx.globalCompositeOperation = 'source-over';
 }
 
@@ -1018,15 +1074,18 @@ function stopAlarm() {
   alarmPlaying = false;
 }
 
-function triggerAlert(count, runners, isHoard, isPanicRisk = false, vulnerableCount = 0) {
+function triggerAlert(count, runners, isHoard, isPanicRisk = false, vulnerableCount = 0, consensus = 0) {
   if (statusIndicator) {
     statusIndicator.classList.remove('active');
     statusIndicator.classList.add('alert');
   }
   
   if (isHoard) {
-    if (statusText) statusText.textContent = '🚨 HOARD / STAMPEDE ALERT';
-    if (alertMessage) alertMessage.innerHTML = `<strong>CRITICAL:</strong> Sudden mass movement detected (${runners} runners). <strong>EVACUATE AREA IMMEDIATELY.</strong>`;
+    statusText.textContent = consensus > 80 ? '🚨 UNIDIRECTIONAL STAMPEDE ALERT' : '🚨 HOARD / STAMPEDE ALERT';
+    if (alertMessage) {
+       const consensusMsg = consensus > 80 ? `<strong>Consensus: ${Math.round(consensus)}% (Direct Threat).</strong> ` : '';
+       alertMessage.innerHTML = `<strong>CRITICAL:</strong> ${consensusMsg}Sudden mass movement detected (${runners} runners). <strong>EVACUATE AREA IMMEDIATELY.</strong>`;
+    }
   } else if (isPanicRisk) {
     if (statusText) statusText.textContent = '🚨 PANIC NOISE ALERT';
     if (alertMessage) alertMessage.innerHTML = `<strong>CRITICAL:</strong> High-decibel panic signature detected. Possible crowd distress. Use emergency exits.`;
